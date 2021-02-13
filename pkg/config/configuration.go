@@ -129,7 +129,13 @@ type ZipkinSpec struct {
 
 // MetricSpec configuration for metrics
 type MetricSpec struct {
-	Enabled bool `json:"enabled" yaml:"enabled"`
+	Enabled    bool           `json:"enabled" yaml:"enabled"`
+	Opencensus OpencensusSpec `json:"opencensus" yaml:"opencensus"`
+}
+
+// OpencensusSpec defines the endpoint for the metrics' opencensus exporter to be used instead of Prometheus
+type OpencensusSpec struct {
+	EndpointAddress string `json:"endpointAddress" yaml:"endpointAddress"`
 }
 
 // AppPolicySpec defines the policy data structure for each app

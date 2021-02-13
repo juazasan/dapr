@@ -31,7 +31,7 @@ func NewExporter(namespace string) Exporter {
 	return &promMetricsExporter{
 		&exporter{
 			namespace: namespace,
-			options:   defaultMetricOptions(),
+			options:   DefaultMetricOptions(),
 			logger:    logger.NewLogger("dapr.metrics"),
 		},
 		nil,

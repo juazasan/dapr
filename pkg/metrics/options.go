@@ -22,7 +22,8 @@ type Options struct {
 	metricsPort string
 }
 
-func defaultMetricOptions() *Options {
+// DefaultMetricOptions returns an Options object with the defaults
+func DefaultMetricOptions() *Options {
 	return &Options{
 		metricsPort:    defaultMetricsPort,
 		MetricsEnabled: defaultMetricsEnabled,
