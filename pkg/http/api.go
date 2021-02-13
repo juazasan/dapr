@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -184,15 +184,15 @@ func (a *api) constructSecretEndpoints() []Endpoint {
 	return []Endpoint{
 		{
 			Methods: []string{fasthttp.MethodGet},
-			Route:   "secrets/{secretStoreName}/{key}",
-			Version: apiVersionV1,
-			Handler: a.onGetSecret,
-		},
-		{
-			Methods: []string{fasthttp.MethodGet},
 			Route:   "secrets/{secretStoreName}/bulk",
 			Version: apiVersionV1,
 			Handler: a.onBulkGetSecret,
+		},
+		{
+			Methods: []string{fasthttp.MethodGet},
+			Route:   "secrets/{secretStoreName}/{key}",
+			Version: apiVersionV1,
+			Handler: a.onGetSecret,
 		},
 	}
 }
@@ -503,6 +503,20 @@ func (a *api) onGetState(reqCtx *fasthttp.RequestCtx) {
 	respondWithETaggedJSON(reqCtx, fasthttp.StatusOK, resp.Data, resp.ETag)
 }
 
+func extractEtag(reqCtx *fasthttp.RequestCtx) (bool, string) {
+	var etag string
+	var hasEtag bool
+	reqCtx.Request.Header.VisitAll(func(key []byte, value []byte) {
+		if string(key) == "If-Match" {
+			etag = string(value)
+			hasEtag = true
+			return
+		}
+	})
+
+	return hasEtag, etag
+}
+
 func (a *api) onDeleteState(reqCtx *fasthttp.RequestCtx) {
 	store, storeName, err := a.getStateStoreWithRequestValidation(reqCtx)
 	if err != nil {
@@ -511,16 +525,13 @@ func (a *api) onDeleteState(reqCtx *fasthttp.RequestCtx) {
 	}
 
 	key := reqCtx.UserValue(stateKeyParam).(string)
-	etag := string(reqCtx.Request.Header.Peek("If-Match"))
 
 	concurrency := string(reqCtx.QueryArgs().Peek(concurrencyParam))
 	consistency := string(reqCtx.QueryArgs().Peek(consistencyParam))
 
 	metadata := getMetadataFromRequest(reqCtx)
-
 	req := state.DeleteRequest{
-		Key:  state_loader.GetModifiedStateKey(key, storeName, a.id),
-		ETag: etag,
+		Key: state_loader.GetModifiedStateKey(key, storeName, a.id),
 		Options: state.DeleteStateOption{
 			Concurrency: concurrency,
 			Consistency: consistency,
@@ -528,11 +539,18 @@ func (a *api) onDeleteState(reqCtx *fasthttp.RequestCtx) {
 		Metadata: metadata,
 	}
 
+	exists, etag := extractEtag(reqCtx)
+	if exists {
+		req.ETag = &etag
+	}
+
 	err = store.Delete(&req)
 	if err != nil {
-		msg := NewErrorResponse("ERR_STATE_DELETE", fmt.Sprintf(messages.ErrStateDelete, key, err))
-		respondWithError(reqCtx, fasthttp.StatusInternalServerError, msg)
-		log.Debug(msg)
+		statusCode, errMsg, resp := a.stateErrorResponse(err, "ERR_STATE_DELETE")
+		resp.Message = fmt.Sprintf(messages.ErrStateDelete, key, errMsg)
+
+		respondWithError(reqCtx, statusCode, resp)
+		log.Debug(resp.Message)
 		return
 	}
 	respondEmpty(reqCtx)
@@ -625,7 +643,7 @@ func (a *api) onBulkGetSecret(reqCtx *fasthttp.RequestCtx) {
 		return
 	}
 
-	filteredSecrets := map[string]string{}
+	filteredSecrets := map[string]map[string]string{}
 	for key, v := range resp.Data {
 		if a.isSecretAllowed(secretStoreName, key) {
 			filteredSecrets[key] = v
@@ -661,13 +679,51 @@ func (a *api) onPostState(reqCtx *fasthttp.RequestCtx) {
 	err = store.BulkSet(reqs)
 	if err != nil {
 		storeName := a.getStateStoreName(reqCtx)
-		msg := NewErrorResponse("ERR_STATE_SAVE", fmt.Sprintf(messages.ErrStateSave, storeName, err.Error()))
-		respondWithError(reqCtx, fasthttp.StatusInternalServerError, msg)
-		log.Debug(msg)
+
+		statusCode, errMsg, resp := a.stateErrorResponse(err, "ERR_STATE_SAVE")
+		resp.Message = fmt.Sprintf(messages.ErrStateSave, storeName, errMsg)
+
+		respondWithError(reqCtx, statusCode, resp)
+		log.Debug(resp.Message)
 		return
 	}
 
 	respondEmpty(reqCtx)
+}
+
+// stateErrorResponse takes a state store error and returns a corresponding status code, error message and modified user error
+func (a *api) stateErrorResponse(err error, errorCode string) (int, string, ErrorResponse) {
+	var message string
+	var code int
+	var etag bool
+	etag, code, message = a.etagError(err)
+
+	r := ErrorResponse{
+		ErrorCode: errorCode,
+	}
+	if etag {
+		return code, message, r
+	}
+	message = err.Error()
+
+	return fasthttp.StatusInternalServerError, message, r
+}
+
+// etagError checks if the error from the state store is an etag error and returns a bool for indication,
+// an status code and an error message
+func (a *api) etagError(err error) (bool, int, string) {
+	e, ok := err.(*state.ETagError)
+	if !ok {
+		return false, -1, ""
+	}
+	switch e.Kind() {
+	case state.ETagMismatch:
+		return true, fasthttp.StatusConflict, e.Error()
+	case state.ETagInvalid:
+		return true, fasthttp.StatusBadRequest, e.Error()
+	}
+
+	return false, -1, ""
 }
 
 func (a *api) getStateStoreName(reqCtx *fasthttp.RequestCtx) string {
@@ -713,8 +769,14 @@ func (a *api) onDirectMessage(reqCtx *fasthttp.RequestCtx) {
 	statusCode := int(resp.Status().Code)
 	if !resp.IsHTTPResponse() {
 		statusCode = invokev1.HTTPStatusFromCode(codes.Code(statusCode))
+		if statusCode != fasthttp.StatusOK {
+			if body, err = invokev1.ProtobufToJSON(resp.Status()); err != nil {
+				msg := NewErrorResponse("ERR_MALFORMED_RESPONSE", err.Error())
+				respondWithError(reqCtx, fasthttp.StatusInternalServerError, msg)
+				return
+			}
+		}
 	}
-
 	respond(reqCtx, statusCode, body)
 }
 

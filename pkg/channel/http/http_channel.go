@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -19,6 +19,7 @@ import (
 	invokev1 "github.com/dapr/dapr/pkg/messaging/v1"
 	commonv1pb "github.com/dapr/dapr/pkg/proto/common/v1"
 	internalv1pb "github.com/dapr/dapr/pkg/proto/internals/v1"
+	auth "github.com/dapr/dapr/pkg/runtime/security"
 	"github.com/valyala/fasthttp"
 	"go.opencensus.io/plugin/ochttp/propagation/tracecontext"
 	"google.golang.org/grpc/codes"
@@ -34,22 +35,19 @@ const (
 
 // Channel is an HTTP implementation of an AppChannel
 type Channel struct {
-	client      *fasthttp.Client
-	baseAddress string
-	ch          chan int
-	tracingSpec config.TracingSpec
+	client         *fasthttp.Client
+	baseAddress    string
+	ch             chan int
+	tracingSpec    config.TracingSpec
+	appHeaderToken string
 }
 
-// CreateAppChannel creates an HTTP AppChannel.
+// CreateLocalChannel creates an HTTP AppChannel
 // nolint:gosec
-func CreateAppChannel(applicationHost string, port, maxConcurrency int, spec config.TracingSpec, sslEnabled bool) (channel.AppChannel, error) {
-	channelAddress := channel.DefaultChannelAddress
+func CreateLocalChannel(port, maxConcurrency int, spec config.TracingSpec, sslEnabled bool) (channel.AppChannel, error) {
 	scheme := httpScheme
 	if sslEnabled {
 		scheme = httpsScheme
-	}
-	if applicationHost != channel.DefaultChannelAddress {
-		channelAddress = applicationHost
 	}
 
 	c := &Channel{
@@ -57,8 +55,9 @@ func CreateAppChannel(applicationHost string, port, maxConcurrency int, spec con
 			MaxConnsPerHost:           1000000,
 			MaxIdemponentCallAttempts: 0,
 		},
-		baseAddress: fmt.Sprintf("%s://%s:%d", scheme, channelAddress, port),
-		tracingSpec: spec,
+		baseAddress:    fmt.Sprintf("%s://%s:%d", scheme, channel.DefaultChannelAddress, port),
+		tracingSpec:    spec,
+		appHeaderToken: auth.GetAppToken(),
 	}
 
 	if sslEnabled {
@@ -152,6 +151,10 @@ func (h *Channel) constructRequest(ctx context.Context, req *invokev1.InvokeMeth
 	channelReq.Header.Set("traceparent", tp)
 	if ts != "" {
 		channelReq.Header.Set("tracestate", ts)
+	}
+
+	if h.appHeaderToken != "" {
+		channelReq.Header.Set(auth.APITokenHeader, h.appHeaderToken)
 	}
 
 	// Set Content body and types

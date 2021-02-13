@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ------------------------------------------------------------
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Microsoft Corporation and Dapr Contributors.
 # Licensed under the MIT License.
 # ------------------------------------------------------------
 
@@ -26,7 +26,7 @@ echo "Selected Dapr Test Resource group: $DAPR_TEST_RESOURCE_GROUP"
 echo "Selected Kubernetes Namespace: $DAPR_TEST_NAMESPACE"
 
 # Find the available cluster
-for clustername in `cat $1 | sed 's/\r//g' | xargs`; do
+for clustername in `cat $1 | sed 's/\r//g' | sort -R | xargs`; do
     echo "Scanning $clustername ..."
 
     echo "Switching to $clustername context..."

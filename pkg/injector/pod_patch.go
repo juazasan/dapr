@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -34,11 +34,11 @@ const (
 	daprAppPortKey                    = "dapr.io/app-port"
 	daprConfigKey                     = "dapr.io/config"
 	daprAppProtocolKey                = "dapr.io/app-protocol"
-	daprAppIDKey                      = "dapr.io/app-id"
-	daprAppHostKey                    = "dapr.io/app-host"
+	appIDKey                          = "dapr.io/app-id"
 	daprEnableProfilingKey            = "dapr.io/enable-profiling"
 	daprLogLevel                      = "dapr.io/log-level"
 	daprAPITokenSecret                = "dapr.io/api-token-secret" /* #nosec */
+	daprAppTokenSecret                = "dapr.io/app-token-secret" /* #nosec */
 	daprLogAsJSON                     = "dapr.io/log-as-json"
 	daprAppMaxConcurrencyKey          = "dapr.io/app-max-concurrency"
 	daprMetricsPortKey                = "dapr.io/metrics-port"
@@ -54,6 +54,7 @@ const (
 	daprReadinessProbeTimeoutKey      = "dapr.io/sidecar-readiness-probe-timeout-seconds"
 	daprReadinessProbePeriodKey       = "dapr.io/sidecar-readiness-probe-period-seconds"
 	daprReadinessProbeThresholdKey    = "dapr.io/sidecar-readiness-probe-threshold"
+	daprMaxRequestBodySize            = "dapr.io/http-max-request-size"
 	daprAppSSLKey                     = "dapr.io/app-ssl"
 	containersPath                    = "/spec/containers"
 	sidecarHTTPPort                   = 3500
@@ -115,8 +116,6 @@ func (i *injector) getPodPatchOperations(ar *v1.AdmissionReview,
 		return nil, err
 	}
 
-	applicationHost := getAppHost(pod)
-
 	// Keep DNS resolution outside of getSidecarContainer for unit testing.
 	placementAddress := fmt.Sprintf("%s:50005", getKubernetesDNS(placementService, namespace))
 	sentryAddress := fmt.Sprintf("%s:80", getKubernetesDNS(sentryService, namespace))
@@ -134,7 +133,7 @@ func (i *injector) getPodPatchOperations(ar *v1.AdmissionReview,
 	}
 
 	tokenMount := getTokenVolumeMount(pod)
-	sidecarContainer, err := getSidecarContainer(pod.Annotations, id, image, imagePullPolicy, applicationHost, req.Namespace, apiSrvAddress, placementAddress, tokenMount, trustAnchors, certChain, certKey, sentryAddress, mtlsEnabled, identity)
+	sidecarContainer, err := getSidecarContainer(pod.Annotations, id, image, imagePullPolicy, req.Namespace, apiSrvAddress, placementAddress, tokenMount, trustAnchors, certChain, certKey, sentryAddress, mtlsEnabled, identity)
 	if err != nil {
 		return nil, err
 	}
@@ -289,11 +288,7 @@ func getMetricsPort(annotations map[string]string) int {
 }
 
 func getAppID(pod corev1.Pod) string {
-	return getStringAnnotationOrDefault(pod.Annotations, daprAppIDKey, pod.GetName())
-}
-
-func getAppHost(pod corev1.Pod) string {
-	return getStringAnnotationOrDefault(pod.Annotations, daprAppHostKey, "")
+	return getStringAnnotationOrDefault(pod.Annotations, appIDKey, pod.GetName())
 }
 
 func getLogLevel(annotations map[string]string) string {
@@ -314,6 +309,14 @@ func appSSLEnabled(annotations map[string]string) bool {
 
 func getAPITokenSecret(annotations map[string]string) string {
 	return getStringAnnotationOrDefault(annotations, daprAPITokenSecret, "")
+}
+
+func GetAppTokenSecret(annotations map[string]string) string {
+	return getStringAnnotationOrDefault(annotations, daprAppTokenSecret, "")
+}
+
+func getMaxRequestBodySize(annotations map[string]string) (int32, error) {
+	return getInt32Annotation(annotations, daprMaxRequestBodySize)
 }
 
 func getBoolAnnotationOrDefault(annotations map[string]string, key string, defaultValue bool) bool {
@@ -452,8 +455,7 @@ func getPullPolicy(pullPolicy string) corev1.PullPolicy {
 	}
 }
 
-func getSidecarContainer(annotations map[string]string, id, daprSidecarImage, imagePullPolicy, applicationHost, namespace, controlPlaneAddress, placementServiceAddress string, tokenVolumeMount *corev1.VolumeMount, trustAnchors, certChain, certKey, sentryAddress string, mtlsEnabled bool, identity string) (*corev1.Container, error) {
-	// TODO consider reducing number of parameters to the method.
+func getSidecarContainer(annotations map[string]string, id, daprSidecarImage, imagePullPolicy, namespace, controlPlaneAddress, placementServiceAddress string, tokenVolumeMount *corev1.VolumeMount, trustAnchors, certChain, certKey, sentryAddress string, mtlsEnabled bool, identity string) (*corev1.Container, error) {
 	appPort, err := getAppPort(annotations)
 	if err != nil {
 		return nil, err
@@ -476,6 +478,11 @@ func getSidecarContainer(annotations map[string]string, id, daprSidecarImage, im
 	httpHandler := getProbeHTTPHandler(sidecarHTTPPort, apiVersionV1, sidecarHealthzPath)
 
 	allowPrivilegeEscalation := false
+
+	requestBodySize, err := getMaxRequestBodySize(annotations)
+	if err != nil {
+		log.Warn(err)
+	}
 
 	c := &corev1.Container{
 		Name:            sidecarContainerName,
@@ -516,10 +523,6 @@ func getSidecarContainer(annotations map[string]string, id, daprSidecarImage, im
 				Name:  "NAMESPACE",
 				Value: namespace,
 			},
-			{
-				Name:  "APPLICATION_HOST",
-				Value: applicationHost,
-			},
 		},
 		Args: []string{
 			"--mode", "kubernetes",
@@ -536,6 +539,7 @@ func getSidecarContainer(annotations map[string]string, id, daprSidecarImage, im
 			"--app-max-concurrency", fmt.Sprintf("%v", maxConcurrency),
 			"--sentry-address", sentryAddress,
 			"--metrics-port", fmt.Sprintf("%v", metricsPort),
+			"--dapr-http-max-request-size", fmt.Sprintf("%v", requestBodySize),
 		},
 		ReadinessProbe: &corev1.Probe{
 			Handler:             httpHandler,
@@ -600,6 +604,21 @@ func getSidecarContainer(annotations map[string]string, id, daprSidecarImage, im
 					Key: "token",
 					LocalObjectReference: corev1.LocalObjectReference{
 						Name: secret,
+					},
+				},
+			},
+		})
+	}
+
+	appSecret := GetAppTokenSecret(annotations)
+	if appSecret != "" {
+		c.Env = append(c.Env, corev1.EnvVar{
+			Name: auth.AppAPITokenEnvVar,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					Key: "token",
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: appSecret,
 					},
 				},
 			},

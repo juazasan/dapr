@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -43,6 +43,7 @@ import (
 	"github.com/dapr/components-contrib/state/hazelcast"
 	"github.com/dapr/components-contrib/state/memcached"
 	"github.com/dapr/components-contrib/state/mongodb"
+	state_mysql "github.com/dapr/components-contrib/state/mysql"
 	"github.com/dapr/components-contrib/state/postgresql"
 	state_redis "github.com/dapr/components-contrib/state/redis"
 	"github.com/dapr/components-contrib/state/rethinkdb"
@@ -73,6 +74,7 @@ import (
 
 	// Bindings
 	"github.com/dapr/components-contrib/bindings"
+	"github.com/dapr/components-contrib/bindings/alicloud/oss"
 	"github.com/dapr/components-contrib/bindings/apns"
 	"github.com/dapr/components-contrib/bindings/aws/dynamodb"
 	"github.com/dapr/components-contrib/bindings/aws/kinesis"
@@ -94,11 +96,13 @@ import (
 	"github.com/dapr/components-contrib/bindings/kafka"
 	"github.com/dapr/components-contrib/bindings/kubernetes"
 	"github.com/dapr/components-contrib/bindings/mqtt"
+	"github.com/dapr/components-contrib/bindings/mysql"
 	"github.com/dapr/components-contrib/bindings/postgres"
 	"github.com/dapr/components-contrib/bindings/postmark"
 	bindings_rabbitmq "github.com/dapr/components-contrib/bindings/rabbitmq"
 	"github.com/dapr/components-contrib/bindings/redis"
 	"github.com/dapr/components-contrib/bindings/rethinkdb/statechange"
+	"github.com/dapr/components-contrib/bindings/smtp"
 	"github.com/dapr/components-contrib/bindings/twilio/sendgrid"
 	"github.com/dapr/components-contrib/bindings/twilio/sms"
 	"github.com/dapr/components-contrib/bindings/twitter"
@@ -204,6 +208,9 @@ func main() {
 				return rethinkdb.NewRethinkDBStateStore(logContrib)
 			}),
 			state_loader.New("aws.dynamodb", state_dynamodb.NewDynamoDBStateStore),
+			state_loader.New("mysql", func() state.Store {
+				return state_mysql.NewMySQLStateStore(logContrib)
+			}),
 		),
 		runtime.WithPubSubs(
 			pubsub_loader.New("redis", func() pubs.PubSub {
@@ -293,6 +300,9 @@ func main() {
 			}),
 		),
 		runtime.WithOutputBindings(
+			bindings_loader.NewOutput("alicloud.oss", func() bindings.OutputBinding {
+				return oss.NewAliCloudOSS(logContrib)
+			}),
 			bindings_loader.NewOutput("apns", func() bindings.OutputBinding {
 				return apns.NewAPNS(logContrib)
 			}),
@@ -373,6 +383,12 @@ func main() {
 			}),
 			bindings_loader.NewOutput("postmark", func() bindings.OutputBinding {
 				return postmark.NewPostmark(logContrib)
+			}),
+			bindings_loader.NewOutput("mysql", func() bindings.OutputBinding {
+				return mysql.NewMysql(logContrib)
+			}),
+			bindings_loader.NewOutput("smtp", func() bindings.OutputBinding {
+				return smtp.NewSMTP(logContrib)
 			}),
 		),
 		runtime.WithHTTPMiddleware(

@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -14,11 +14,15 @@ import (
 	"os"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"contrib.go.opencensus.io/exporter/zipkin"
 	"github.com/dapr/components-contrib/bindings"
+	"github.com/dapr/components-contrib/contenttype"
 	"github.com/dapr/components-contrib/pubsub"
 	"github.com/dapr/components-contrib/secretstores"
 	"github.com/dapr/components-contrib/state"
@@ -98,13 +102,15 @@ func (m *MockKubernetesStateStore) GetSecret(req secretstores.GetSecretRequest) 
 	}, nil
 }
 
-func (m *MockKubernetesStateStore) BulkGetSecret(req secretstores.BulkGetSecretRequest) (secretstores.GetSecretResponse, error) {
-	return secretstores.GetSecretResponse{
-		Data: map[string]string{
-			"key1":   "value1",
-			"_value": "_value_data",
-			"name1":  "value1",
-		},
+func (m *MockKubernetesStateStore) BulkGetSecret(req secretstores.BulkGetSecretRequest) (secretstores.BulkGetSecretResponse, error) {
+	response := map[string]map[string]string{}
+	response["k8s-secret"] = map[string]string{
+		"key1":   "value1",
+		"_value": "_value_data",
+		"name1":  "value1",
+	}
+	return secretstores.BulkGetSecretResponse{
+		Data: response,
 	}, nil
 }
 
@@ -189,6 +195,7 @@ func TestProcessComponentsAndDependents(t *testing.T) {
 		},
 		Spec: components_v1alpha1.ComponentSpec{
 			Type:     "pubsubs.mockPubSub",
+			Version:  "v1",
 			Metadata: getFakeMetadataItems(),
 		},
 	}
@@ -210,6 +217,7 @@ func TestDoProcessComponent(t *testing.T) {
 		},
 		Spec: components_v1alpha1.ComponentSpec{
 			Type:     "pubsub.mockPubSub",
+			Version:  "v1",
 			Metadata: getFakeMetadataItems(),
 		},
 	}
@@ -254,7 +262,8 @@ func TestInitState(t *testing.T) {
 			Name: TestPubsubName,
 		},
 		Spec: components_v1alpha1.ComponentSpec{
-			Type: "state.mockState",
+			Type:    "state.mockState",
+			Version: "v1",
 			Metadata: []components_v1alpha1.MetadataItem{
 				{
 					Name: "actorStateStore",
@@ -359,12 +368,12 @@ func TestSetupTracing(t *testing.T) {
 			rt := NewTestDaprRuntime(modes.StandaloneMode)
 			rt.globalConfig.Spec.TracingSpec = tc.tracingConfig
 			if tc.hostAddress != "" {
-				rt.daprHostAddress = tc.hostAddress
+				rt.hostAddress = tc.hostAddress
 			}
 			// Setup tracing with the fake trace exporter store to confirm
 			// the right exporter was registered.
 			exporterStore := &fakeTraceExporterStore{}
-			if err := rt.setupTracing(rt.daprHostAddress, exporterStore); tc.expectedErr != "" {
+			if err := rt.setupTracing(rt.hostAddress, exporterStore); tc.expectedErr != "" {
 				assert.Contains(t, err.Error(), tc.expectedErr)
 			} else {
 				assert.Nil(t, err)
@@ -377,9 +386,119 @@ func TestSetupTracing(t *testing.T) {
 			// Setup tracing with the OpenCensus global exporter store.
 			// We have no way to validate the result, but we can at least
 			// confirm that nothing blows up.
-			rt.setupTracing(rt.daprHostAddress, openCensusExporterStore{})
+			rt.setupTracing(rt.hostAddress, openCensusExporterStore{})
 		})
 	}
+}
+
+func TestMetadataUUID(t *testing.T) {
+	pubsubComponent := components_v1alpha1.Component{
+		ObjectMeta: meta_v1.ObjectMeta{
+			Name: TestPubsubName,
+		},
+		Spec: components_v1alpha1.ComponentSpec{
+			Type:     "pubsub.mockPubSub",
+			Version:  "v1",
+			Metadata: getFakeMetadataItems(),
+		},
+	}
+
+	pubsubComponent.Spec.Metadata = append(
+		pubsubComponent.Spec.Metadata,
+		components_v1alpha1.MetadataItem{
+			Name: "consumerID",
+			Value: components_v1alpha1.DynamicValue{
+				JSON: v1.JSON{
+					Raw: []byte("{uuid}"),
+				},
+			},
+		}, components_v1alpha1.MetadataItem{
+			Name: "twoUUIDs",
+			Value: components_v1alpha1.DynamicValue{
+				JSON: v1.JSON{
+					Raw: []byte("{uuid} {uuid}"),
+				},
+			},
+		})
+	rt := NewTestDaprRuntime(modes.StandaloneMode)
+	mockPubSub := new(daprt.MockPubSub)
+
+	rt.pubSubRegistry.Register(
+		pubsub_loader.New("mockPubSub", func() pubsub.PubSub {
+			return mockPubSub
+		}),
+	)
+
+	mockPubSub.On("Init", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		metadata := args.Get(0).(pubsub.Metadata)
+		consumerID := metadata.Properties["consumerID"]
+		uuid0, err := uuid.Parse(consumerID)
+		assert.Nil(t, err)
+
+		twoUUIDs := metadata.Properties["twoUUIDs"]
+		uuids := strings.Split(twoUUIDs, " ")
+		assert.Equal(t, 2, len(uuids))
+		uuid1, err := uuid.Parse(uuids[0])
+		assert.Nil(t, err)
+		uuid2, err := uuid.Parse(uuids[1])
+		assert.Nil(t, err)
+
+		assert.NotEqual(t, uuid0, uuid1)
+		assert.NotEqual(t, uuid0, uuid2)
+		assert.NotEqual(t, uuid1, uuid2)
+	})
+
+	err := rt.processComponentAndDependents(pubsubComponent)
+	assert.Nil(t, err)
+}
+
+func TestConsumerID(t *testing.T) {
+	metadata := []components_v1alpha1.MetadataItem{
+		{
+			Name: "host",
+			Value: components_v1alpha1.DynamicValue{
+				JSON: v1.JSON{
+					Raw: []byte("localhost"),
+				},
+			},
+		},
+		{
+			Name: "password",
+			Value: components_v1alpha1.DynamicValue{
+				JSON: v1.JSON{
+					Raw: []byte("fakePassword"),
+				},
+			},
+		},
+	}
+	pubsubComponent := components_v1alpha1.Component{
+		ObjectMeta: meta_v1.ObjectMeta{
+			Name: TestPubsubName,
+		},
+		Spec: components_v1alpha1.ComponentSpec{
+			Type:     "pubsub.mockPubSub",
+			Version:  "v1",
+			Metadata: metadata,
+		},
+	}
+
+	rt := NewTestDaprRuntime(modes.StandaloneMode)
+	mockPubSub := new(daprt.MockPubSub)
+
+	rt.pubSubRegistry.Register(
+		pubsub_loader.New("mockPubSub", func() pubsub.PubSub {
+			return mockPubSub
+		}),
+	)
+
+	mockPubSub.On("Init", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		metadata := args.Get(0).(pubsub.Metadata)
+		consumerID := metadata.Properties["consumerID"]
+		assert.Equal(t, TestRuntimeConfigID, consumerID)
+	})
+
+	err := rt.processComponentAndDependents(pubsubComponent)
+	assert.Nil(t, err)
 }
 
 func TestInitPubSub(t *testing.T) {
@@ -392,6 +511,7 @@ func TestInitPubSub(t *testing.T) {
 			},
 			Spec: components_v1alpha1.ComponentSpec{
 				Type:     "pubsub.mockPubSub",
+				Version:  "v1",
 				Metadata: getFakeMetadataItems(),
 			},
 		}, {
@@ -400,6 +520,7 @@ func TestInitPubSub(t *testing.T) {
 			},
 			Spec: components_v1alpha1.ComponentSpec{
 				Type:     "pubsub.mockPubSub2",
+				Version:  "v1",
 				Metadata: getFakeMetadataItems(),
 			},
 		},
@@ -882,10 +1003,11 @@ func TestInitSecretStores(t *testing.T) {
 				Name: "kubernetesMock",
 			},
 			Spec: components_v1alpha1.ComponentSpec{
-				Type: "secretstores.kubernetesMock",
+				Type:    "secretstores.kubernetesMock",
+				Version: "v1",
 			},
 		})
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 	})
 
 	t.Run("secret store is registered", func(t *testing.T) {
@@ -896,14 +1018,16 @@ func TestInitSecretStores(t *testing.T) {
 				return m
 			}))
 
-		rt.processComponentAndDependents(components_v1alpha1.Component{
+		err := rt.processComponentAndDependents(components_v1alpha1.Component{
 			ObjectMeta: meta_v1.ObjectMeta{
 				Name: "kubernetesMock",
 			},
 			Spec: components_v1alpha1.ComponentSpec{
-				Type: "secretstores.kubernetesMock",
+				Type:    "secretstores.kubernetesMock",
+				Version: "v1",
 			},
 		})
+		assert.NoError(t, err)
 		assert.NotNil(t, rt.secretStores["kubernetesMock"])
 	})
 
@@ -921,7 +1045,8 @@ func TestInitSecretStores(t *testing.T) {
 				Name: "kubernetesMock",
 			},
 			Spec: components_v1alpha1.ComponentSpec{
-				Type: "secretstores.kubernetesMock",
+				Type:    "secretstores.kubernetesMock",
+				Version: "v1",
 			},
 		})
 
@@ -1035,7 +1160,8 @@ func TestProcessComponentSecrets(t *testing.T) {
 			Name: "mockBinding",
 		},
 		Spec: components_v1alpha1.ComponentSpec{
-			Type: "bindings.mock",
+			Type:    "bindings.mock",
+			Version: "v1",
 			Metadata: []components_v1alpha1.MetadataItem{
 				{
 					Name: "a",
@@ -1080,7 +1206,8 @@ func TestProcessComponentSecrets(t *testing.T) {
 				Name: "kubernetes",
 			},
 			Spec: components_v1alpha1.ComponentSpec{
-				Type: "secretstores.kubernetes",
+				Type:    "secretstores.kubernetes",
+				Version: "v1",
 			},
 		})
 
@@ -1167,7 +1294,8 @@ func TestExtractComponentCategory(t *testing.T) {
 		t.Run(tt.specType, func(t *testing.T) {
 			fakeComp := components_v1alpha1.Component{
 				Spec: components_v1alpha1.ComponentSpec{
-					Type: tt.specType,
+					Type:    tt.specType,
+					Version: "v1",
 				},
 			}
 			assert.Equal(t, string(rt.extractComponentCategory(fakeComp)), tt.category)
@@ -1195,7 +1323,8 @@ func TestFlushOutstandingComponent(t *testing.T) {
 				Name: "kubernetesMock",
 			},
 			Spec: components_v1alpha1.ComponentSpec{
-				Type: "secretstores.kubernetesMock",
+				Type:    "secretstores.kubernetesMock",
+				Version: "v1",
 			},
 		}
 		rt.flushOutstandingComponents()
@@ -1213,7 +1342,8 @@ func TestFlushOutstandingComponent(t *testing.T) {
 				Name: "kubernetesMock2",
 			},
 			Spec: components_v1alpha1.ComponentSpec{
-				Type: "secretstores.kubernetesMock",
+				Type:    "secretstores.kubernetesMock",
+				Version: "v1",
 			},
 		}
 		rt.flushOutstandingComponents()
@@ -1255,7 +1385,8 @@ func TestFlushOutstandingComponent(t *testing.T) {
 				Name: "kubernetesMockGrandChild",
 			},
 			Spec: components_v1alpha1.ComponentSpec{
-				Type: "secretstores.kubernetesMockGrandChild",
+				Type:    "secretstores.kubernetesMockGrandChild",
+				Version: "v1",
 				Metadata: []components_v1alpha1.MetadataItem{
 					{
 						Name: "a",
@@ -1275,7 +1406,8 @@ func TestFlushOutstandingComponent(t *testing.T) {
 				Name: "kubernetesMockChild",
 			},
 			Spec: components_v1alpha1.ComponentSpec{
-				Type: "secretstores.kubernetesMockChild",
+				Type:    "secretstores.kubernetesMockChild",
+				Version: "v1",
 				Metadata: []components_v1alpha1.MetadataItem{
 					{
 						Name: "a",
@@ -1295,7 +1427,8 @@ func TestFlushOutstandingComponent(t *testing.T) {
 				Name: "kubernetesMock",
 			},
 			Spec: components_v1alpha1.ComponentSpec{
-				Type: "secretstores.kubernetesMock",
+				Type:    "secretstores.kubernetesMock",
+				Version: "v1",
 			},
 		}
 		rt.flushOutstandingComponents()
@@ -1312,7 +1445,8 @@ func TestInitSecretStoresInKubernetesMode(t *testing.T) {
 			Name: "fakeSecretStore",
 		},
 		Spec: components_v1alpha1.ComponentSpec{
-			Type: "secretstores.fake.secretstore",
+			Type:    "secretstores.fake.secretstore",
+			Version: "v1",
 			Metadata: []components_v1alpha1.MetadataItem{
 				{
 					Name: "a",
@@ -1366,7 +1500,7 @@ func TestOnNewPublishedMessage(t *testing.T) {
 
 	fakeReq := invokev1.NewInvokeMethodRequest(testPubSubMessage.Topic)
 	fakeReq.WithHTTPExtension(http.MethodPost, "")
-	fakeReq.WithRawData(testPubSubMessage.Data, pubsub.ContentType)
+	fakeReq.WithRawData(testPubSubMessage.Data, contenttype.CloudEventContentType)
 
 	rt := NewTestDaprRuntime(modes.StandaloneMode)
 	rt.topicRoutes = map[string]TopicRoute{}
@@ -1384,6 +1518,36 @@ func TestOnNewPublishedMessage(t *testing.T) {
 
 		// act
 		err := rt.publishMessageHTTP(testPubSubMessage)
+
+		// assert
+		assert.Nil(t, err)
+		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
+	})
+
+	t.Run("succeeded to publish message without TraceID", func(t *testing.T) {
+		mockAppChannel := new(channelt.MockAppChannel)
+		rt.appChannel = mockAppChannel
+
+		// User App subscribes 1 topics via http app channel
+		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
+
+		delete(envelope, pubsub.TraceIDField)
+		bNoTraceID, err := json.Marshal(envelope)
+		assert.Nil(t, err)
+
+		message := &pubsub.NewMessage{
+			Topic:    topic,
+			Data:     bNoTraceID,
+			Metadata: map[string]string{pubsubName: TestPubsubName},
+		}
+
+		fakeReqNoTraceID := invokev1.NewInvokeMethodRequest(message.Topic)
+		fakeReqNoTraceID.WithHTTPExtension(http.MethodPost, "")
+		fakeReqNoTraceID.WithRawData(message.Data, contenttype.CloudEventContentType)
+		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeReqNoTraceID).Return(fakeResp, nil)
+
+		// act
+		err = rt.publishMessageHTTP(message)
 
 		// assert
 		assert.Nil(t, err)
@@ -1590,8 +1754,19 @@ func TestOnNewPublishedMessageGRPC(t *testing.T) {
 		Metadata: map[string]string{pubsubName: TestPubsubName},
 	}
 
+	envelope = pubsub.NewCloudEventsEnvelope("", "", pubsub.DefaultCloudEventType, "", topic, TestSecondPubsubName, "application/octet-stream", []byte{0x1}, "")
+	base64, err := json.Marshal(envelope)
+	assert.Nil(t, err)
+
+	testPubSubMessageBase64 := &pubsub.NewMessage{
+		Topic:    topic,
+		Data:     base64,
+		Metadata: map[string]string{pubsubName: TestPubsubName},
+	}
+
 	testCases := []struct {
 		name             string
+		message          *pubsub.NewMessage
 		responseStatus   runtimev1pb.TopicEventResponse_TopicEventResponseStatus
 		errorExpected    bool
 		noResponseStatus bool
@@ -1599,35 +1774,47 @@ func TestOnNewPublishedMessageGRPC(t *testing.T) {
 	}{
 		{
 			name:             "failed to publish message to user app with unimplemented error",
+			message:          testPubSubMessage,
 			noResponseStatus: true,
 			responseError:    status.Errorf(codes.Unimplemented, "unimplemented method"),
 			errorExpected:    false, // should be dropped with no error
 		},
 		{
 			name:             "failed to publish message to user app with response error",
+			message:          testPubSubMessage,
 			noResponseStatus: true,
 			responseError:    assert.AnError,
 			errorExpected:    true,
 		},
 		{
 			name:             "succeeded to publish message to user app with empty response",
+			message:          testPubSubMessage,
 			noResponseStatus: true,
 		},
 		{
 			name:           "succeeded to publish message to user app with success response",
+			message:        testPubSubMessage,
+			responseStatus: runtimev1pb.TopicEventResponse_SUCCESS,
+		},
+		{
+			name:           "succeeded to publish message to user app with base64 encoded cloud event",
+			message:        testPubSubMessageBase64,
 			responseStatus: runtimev1pb.TopicEventResponse_SUCCESS,
 		},
 		{
 			name:           "succeeded to publish message to user app with retry",
+			message:        testPubSubMessage,
 			responseStatus: runtimev1pb.TopicEventResponse_RETRY,
 			errorExpected:  true,
 		},
 		{
 			name:           "succeeded to publish message to user app with drop",
+			message:        testPubSubMessage,
 			responseStatus: runtimev1pb.TopicEventResponse_DROP,
 		},
 		{
 			name:           "succeeded to publish message to user app with invalid response",
+			message:        testPubSubMessage,
 			responseStatus: runtimev1pb.TopicEventResponse_TopicEventResponseStatus(99),
 			errorExpected:  true,
 		},
@@ -1669,7 +1856,7 @@ func TestOnNewPublishedMessageGRPC(t *testing.T) {
 			defer rt.grpc.AppClient.Close()
 
 			// act
-			err = rt.publishMessageGRPC(testPubSubMessage)
+			err = rt.publishMessageGRPC(tc.message)
 
 			// assert
 			if tc.errorExpected {
@@ -1818,7 +2005,7 @@ func NewTestDaprRuntimeWithProtocol(mode modes.DaprMode, protocol string, appPor
 		-1,
 		false,
 		"",
-		false)
+		false, 4)
 
 	rt := NewDaprRuntime(testRuntimeConfig, &config.Configuration{}, &config.AccessControlList{})
 	return rt
@@ -2035,25 +2222,6 @@ func TestNamespace(t *testing.T) {
 		ns := rt.getNamespace()
 
 		assert.Equal(t, "a", ns)
-	})
-}
-
-func TestApplicationHost(t *testing.T) {
-	t.Run("empty application host", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		ns := rt.getApplicationHost()
-
-		assert.Empty(t, ns)
-	})
-
-	t.Run("non-empty application host", func(t *testing.T) {
-		os.Setenv("APPLICATION_HOST", "host.a.com")
-		defer os.Clearenv()
-
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		ns := rt.getApplicationHost()
-
-		assert.Equal(t, "host.a.com", ns)
 	})
 }
 
