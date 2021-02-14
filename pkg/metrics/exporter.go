@@ -3,7 +3,9 @@ package metrics
 import (
 	"fmt"
 	"net/http"
+	"time"
 
+	"contrib.go.opencensus.io/exporter/ocagent"
 	ocprom "contrib.go.opencensus.io/exporter/prometheus"
 	"github.com/dapr/dapr/pkg/logger"
 	"github.com/pkg/errors"
@@ -26,12 +28,25 @@ type Exporter interface {
 }
 
 // NewExporter creates new MetricsExporter instance
-func NewExporter(namespace string) Exporter {
+func NewExporter(namespace string, opencensusEndpointAddress string) Exporter {
+
 	// TODO: support multiple exporters
+	if opencensusEndpointAddress != "" {
+		return &ocMetricsExporter{
+			opencensusEndpointAddress,
+			&exporter{
+				namespace: namespace,
+				options:   defaultMetricOptions(),
+				logger:    logger.NewLogger("dapr.metrics"),
+			},
+			nil,
+		}
+	}
+
 	return &promMetricsExporter{
 		&exporter{
 			namespace: namespace,
-			options:   DefaultMetricOptions(),
+			options:   defaultMetricOptions(),
 			logger:    logger.NewLogger("dapr.metrics"),
 		},
 		nil,
@@ -106,6 +121,34 @@ func (m *promMetricsExporter) startMetricServer() error {
 			m.exporter.logger.Fatalf("failed to start metrics server: %v", err)
 		}
 	}()
+
+	return nil
+}
+
+type ocMetricsExporter struct {
+	endPointAddress string
+	*exporter
+	ocExporter *ocagent.Exporter
+}
+
+func (m *ocMetricsExporter) Init() error {
+	if !m.exporter.Options().MetricsEnabled {
+		return nil
+	}
+
+	var err error
+	m.ocExporter, err = ocagent.NewExporter(
+		ocagent.WithInsecure(),
+		ocagent.WithReconnectionPeriod(1*time.Second),
+		ocagent.WithAddress(m.endPointAddress),
+		ocagent.WithServiceName(m.namespace))
+
+	if err != nil {
+		return errors.Errorf("Failed to create ocagent-exporter: %v", err)
+	}
+
+	// register exporter to view
+	view.RegisterExporter(m.ocExporter)
 
 	return nil
 }

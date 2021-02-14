@@ -50,11 +50,6 @@ func FromFlags() (*DaprRuntime, error) {
 	loggerOptions := logger.DefaultOptions()
 	loggerOptions.AttachCmdFlags(flag.StringVar, flag.BoolVar)
 
-	metricsExporter := metrics.NewExporter(metrics.DefaultMetricNamespace)
-
-	// attaching only metrics-port option
-	metricsExporter.Options().AttachCmdFlag(flag.StringVar)
-
 	flag.Parse()
 
 	if *runtimeVersion {
@@ -74,11 +69,6 @@ func FromFlags() (*DaprRuntime, error) {
 
 	log.Infof("starting Dapr Runtime -- version %s -- commit %s", version.Version(), version.Commit())
 	log.Infof("log level set to: %s", loggerOptions.OutputLevel)
-
-	// Initialize dapr metrics exporter
-	if err := metricsExporter.Init(); err != nil {
-		log.Fatal(err)
-	}
 
 	daprHTTP, err := strconv.Atoi(*daprHTTPPort)
 	if err != nil {
@@ -179,6 +169,16 @@ func FromFlags() (*DaprRuntime, error) {
 	if globalConfig == nil {
 		log.Info("loading default configuration")
 		globalConfig = global_config.LoadDefaultConfiguration()
+	}
+
+	metricsExporter := metrics.NewExporter(metrics.DefaultMetricNamespace, globalConfig.Spec.MetricSpec.Opencensus.EndpointAddress)
+
+	// attaching only metrics-port option
+	metricsExporter.Options().AttachCmdFlag(flag.StringVar)
+
+	// Initialize dapr metrics exporter
+	if err := metricsExporter.Init(); err != nil {
+		log.Fatal(err)
 	}
 
 	accessControlList, err = global_config.ParseAccessControlSpec(globalConfig.Spec.AccessControlSpec, string(runtimeConfig.ApplicationProtocol))

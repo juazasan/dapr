@@ -131,7 +131,7 @@ type ZipkinSpec struct {
 // MetricSpec configuration for metrics
 type MetricSpec struct {
 	Enabled    bool           `json:"enabled" yaml:"enabled"`
-	Opencensus OpencensusSpec `json:"opencensus" yaml:"opencensus"`
+	Opencensus OpencensusSpec `json:"opencensus" yaml:"opencensus,omitempty"`
 }
 
 // OpencensusSpec defines the endpoint for the metrics' opencensus exporter to be used instead of Prometheus
